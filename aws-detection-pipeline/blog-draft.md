@@ -117,7 +117,7 @@ The trade-off is latency and cost — every failed login now requires a DynamoDB
 
 **Lesson:** Test each event type individually before building the handler. EventBridge silently drops events that don't match the rule — there's no "event rejected" log unless you wire up a dead-letter queue.
 
-> 📸 **SCREENSHOT — CloudWatch Logs:** Open CloudWatch → Log groups → your Lambda log group. Show a log stream with the failed login events appearing after the fix. Before/after if you have it. This makes the debugging story real.
+> 📸 **SCREENSHOT — CloudTrail console:** Open CloudTrail → Event history, filter by Event name `ConsoleLogin`. Show the events appearing after the fix was applied. Before/after if you have it. This makes the debugging story real.
 
 ### Issue 2: QuickSight S3 Integration Wouldn't Work
 
