@@ -162,3 +162,13 @@ dynamodb:UpdateItem     — SIEM-failed-logins table
 s3:PutObject            — siem-quicksight-data bucket
 sns:Publish             — siem-alerts topic
 ```
+
+---
+
+## If I Were to Extend This
+
+**AWS GuardDuty integration** — GuardDuty would replace a significant portion of the manual EventBridge + Lambda detection logic. It provides managed threat detection with a built-in threat intelligence feed, covers network-level threats (VPC flow logs, DNS queries) that CloudTrail alone can't see, and integrates directly with Security Hub for centralized finding management. The pipeline would shift from building detection rules to consuming and routing GuardDuty findings.
+
+**Automated response actions** — the current pipeline alerts but doesn't act. The natural next step is response automation triggered by the same SNS topic: automatically disable IAM credentials flagged for brute force after the threshold fires, quarantine EC2 instances that trigger termination alerts by moving them to an isolated security group, and block console logins from unexpected geos using an IAM condition key policy update via Lambda.
+
+**Geographic anomaly detection** — the `sourceIPAddress` field in CloudTrail events can be enriched with a GeoIP lookup at alert time. A login from a country the account has never been accessed from is a much stronger signal than a failed login count alone. This would add a new DynamoDB table keyed by username to track known source countries and flag deviations.
