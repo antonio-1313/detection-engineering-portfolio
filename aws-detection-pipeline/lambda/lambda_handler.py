@@ -6,7 +6,7 @@ from util import get_team_from_event
 
 sns_client = boto3.client('sns')
 s3_client = boto3.client('s3')
-S3_BUCKET = 'siem-quicksight-data'
+S3_BUCKET = 'siem-data'
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('SIEM-logs')
 failed_logins_table = dynamodb.Table('SIEM-failed-logins')

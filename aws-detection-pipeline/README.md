@@ -104,7 +104,7 @@ SNS `MessageAttributes` are set on each publish so subscribers can filter by `se
 
 **Dual persistence — why S3 was added:**
 
-Lambda writes each finding to two places: DynamoDB (`SIEM-logs`) for queryable alert storage with a 24-hour TTL, and S3 (`siem-quicksight-data/events/`) as structured JSON for analysis. The S3 layer was added because DynamoDB's scan API is not suited for aggregation queries — visualizing trends across all users and event types requires loading the full dataset. S3 + pandas handles that without any additional infrastructure or cost.
+Lambda writes each finding to two places: DynamoDB (`SIEM-logs`) for queryable alert storage with a 24-hour TTL, and S3 (`siem-data/events/`) as structured JSON for analysis. The S3 layer was added because DynamoDB's scan API is not suited for aggregation queries — visualizing trends across all users and event types requires loading the full dataset. S3 + pandas handles that without any additional infrastructure or cost.
 
 ---
 
@@ -112,7 +112,7 @@ Lambda writes each finding to two places: DynamoDB (`SIEM-logs`) for queryable a
 
 A Jupyter notebook that reads all event records from the S3 bucket and produces six visualizations against the real pipeline data.
 
-**Data source:** Paginates `siem-quicksight-data/events/` via the S3 API, loads each JSON object, and builds a pandas DataFrame with columns: `username`, `event_name`, `source_ip`, `severity`, `team`, `timestamp`.
+**Data source:** Paginates `siem-data/events/` via the S3 API, loads each JSON object, and builds a pandas DataFrame with columns: `username`, `event_name`, `source_ip`, `severity`, `team`, `timestamp`.
 
 **Visualizations:**
 
@@ -159,7 +159,7 @@ A severity label tells you how urgent the alert is. The `recommended_action` fie
 ```
 dynamodb:PutItem        — SIEM-logs table
 dynamodb:UpdateItem     — SIEM-failed-logins table
-s3:PutObject            — siem-quicksight-data bucket
+s3:PutObject            — siem-data bucket
 sns:Publish             — siem-alerts topic
 ```
 
