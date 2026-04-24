@@ -107,6 +107,48 @@ The trade-off is latency and cost — every failed login now requires a DynamoDB
 
 ---
 
+## Demo — Privilege Escalation to Unauthorized S3 Deletion
+
+Rather than just describing what the pipeline detects, here's the concrete attack chain I ran to validate it.
+
+**Setup:** A sample account (`final-project-user`) with zero permissions. An admin account simulating a compromised attacker.
+
+**Step 1 — Privilege escalation:** Logged into the admin account and attached `AmazonS3FullAccess` to `final-project-user`. This simulates an attacker using a compromised admin account to stage a backdoor with destructive capabilities.
+
+The pipeline immediately fires:
+
+```json
+{
+  "event": "AttachUserPolicy",
+  "severity": "HIGH",
+  "mitre": "T1078 - Privilege Escalation",
+  "detail": "Policy 'AmazonS3FullAccess' attached to 'final-project-user' — possible privilege escalation",
+  "recommended_action": "Confirm the actor is authorized. If unexpected, remove the policy and investigate."
+}
+```
+
+> 📸 **SCREENSHOT — SNS alert email (AttachUserPolicy):** Show the HIGH severity alert email for the policy attachment. This is the first alert in the chain.
+
+**Step 2 — Unauthorized bucket deletion:** Signed into `final-project-user` and deleted the sample S3 bucket.
+
+The pipeline fires a second alert, this time CRITICAL — because `final-project-user` is not in the `APPROVED_S3_DELETE_USERS` allowlist, the handler takes the unauthorized path:
+
+```json
+{
+  "event": "DeleteBucket - Unauthorised User",
+  "severity": "CRITICAL",
+  "mitre": "T1485 - Data Destruction / Unauthorized Access",
+  "detail": "UNAUTHORISED: 'final-project-user' attempted to delete S3 bucket 'sample-bucket'.",
+  "recommended_action": "Verify if intentional. Revoke S3 delete permissions if unauthorised. Restore from backup if needed."
+}
+```
+
+> 📸 **SCREENSHOT — SNS alert email (DeleteBucket CRITICAL):** Show the CRITICAL unauthorized deletion alert. This is the payoff of the demo — two chained detections, escalating severity, both with actionable response steps.
+
+Two events, two alerts, two different severity levels, both delivered within seconds. The full detection chain is documented in [`demo-scenario.md`](demo-scenario.md) in the repo.
+
+---
+
 ## Issues We Hit
 
 ### Issue 1: The Brute Force Alert Never Fired
