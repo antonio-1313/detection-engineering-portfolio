@@ -1,6 +1,6 @@
 # Serverless Detection Pipeline — AWS
 
-A cloud-native detection pipeline built on AWS serverless services. The pipeline ingests CloudTrail audit events, evaluates them against detection logic in Lambda, and generates alerts via SNS while persisting findings to DynamoDB. It demonstrates the same core principles as an enterprise SIEM detection rule — event-driven alerting, structured telemetry, and pipeline design — applied to cloud-native infrastructure.
+A cloud-native SIEM detection pipeline built on AWS serverless services. The pipeline ingests CloudTrail audit events in real time, evaluates them against detection logic in Lambda, fires alerts via SNS, and persists findings to both DynamoDB and S3. The S3 layer was added specifically to support data analysis and visualization — events are written as structured JSON objects so they can be queried with pandas and visualized with matplotlib without needing a managed BI tool.
 
 ---
 
@@ -9,77 +9,156 @@ A cloud-native detection pipeline built on AWS serverless services. The pipeline
 ```
 AWS CloudTrail
      │
-     │ (API call events — management plane activity)
+     │  All management-plane API calls
      ▼
-Amazon EventBridge
+Amazon EventBridge  ←── siem-detection-rule (event pattern filter)
      │
-     │ (event pattern rules — filter for suspicious API calls)
+     │  Only monitored event names pass through
      ▼
-AWS Lambda (Detection Engine)
+AWS Lambda  (lambda_handler.py — detection engine)
      │
-     ├──► Amazon DynamoDB   (persist findings — queryable alert store)
-     └──► Amazon SNS        (alert delivery — email / downstream integration)
+     ├──► Amazon DynamoDB    SIEM-logs table       (alert store, 24h TTL)
+     ├──► Amazon DynamoDB    SIEM-failed-logins    (stateful brute-force counter, 5m TTL)
+     ├──► Amazon S3          siem-quicksight-data  (structured event log for analysis)
+     └──► Amazon SNS         siem-alerts           (alert delivery — email + filtering)
 ```
 
-### Component Breakdown
+---
 
-| Component | Role in the Pipeline |
-|-----------|---------------------|
-| **CloudTrail** | Telemetry source — logs every AWS API call with caller identity, source IP, timestamp, and request parameters. Equivalent to a Sysmon event log for cloud infrastructure. |
-| **EventBridge** | Detection layer 1 — applies event pattern rules to filter the CloudTrail stream. Only events matching a pattern (e.g., specific API calls, specific services) are forwarded to Lambda. This is the equivalent of a log source filter in Sigma. |
-| **Lambda** | Detection layer 2 — stateless function that evaluates each event against detection logic. Implements the condition logic equivalent to a Sigma rule's `detection:` block. Enriches findings before writing and alerting. |
-| **DynamoDB** | Alert store — persists each finding with TTL. Provides a queryable, time-ordered record of detections. Equivalent to writing an alert to a SIEM's alert index. |
-| **SNS** | Alert delivery — sends notifications to configured subscribers (email, SQS, Lambda for further enrichment). Equivalent to a SIEM notification action. |
+## Repository Layout
+
+```
+aws-detection-pipeline/
+├── lambda/
+│   └── lambda_handler.py        # Detection engine — all rule logic lives here
+├── eventbridge/
+│   └── siem-detection-rule.json # EventBridge event pattern — the ingestion filter
+└── analysis/
+    └── visuals.ipynb            # Jupyter notebook — 6 visualizations over S3 event data
+```
 
 ---
 
-## What It Detects
+## Component Breakdown
 
-The pipeline is designed to detect suspicious AWS management plane activity — actions taken against the account's control plane that indicate compromise, reconnaissance, or privilege escalation:
+### EventBridge Rule — `eventbridge/siem-detection-rule.json`
 
-| Detection | CloudTrail API | Why It Matters |
-|-----------|---------------|----------------|
-| Root account login | `ConsoleLogin` with `userIdentity.type: Root` | Root usage is almost never legitimate in a mature account; any root console login warrants investigation |
-| IAM policy attachment | `AttachUserPolicy`, `AttachRolePolicy` | Attackers escalate privilege by attaching `AdministratorAccess` to compromised identities |
-| Security control disabled | `DeleteTrail`, `StopLogging`, `DeleteFlowLogs` | Defense evasion — attackers disable logging to prevent detection of subsequent actions |
-| New IAM user created | `CreateUser` | Persistence — attackers create backdoor accounts to maintain access after the initial compromise vector is remediated |
-| Access key created | `CreateAccessKey` | Credential harvesting — programmatic access keys can be used for long-term persistence outside the console |
+The EventBridge rule is the first layer of filtering. It watches the CloudTrail event stream and forwards only the specific API calls this pipeline is built to detect. Everything else is dropped before it ever reaches Lambda.
 
----
+**Sources monitored:** `aws.signin`, `aws.iam`, `aws.ec2`, `aws.s3`
 
-## Detection Engineering Concepts Demonstrated
+**Events captured:**
 
-**Event-driven alerting:** The pipeline reacts to events as they occur — there is no polling interval or batch window. This mirrors how a SIEM with real-time alerting works: telemetry arrives, a rule evaluates it, an alert fires. The architecture makes the latency explicit and measurable.
+| Event | Service | Why It's Monitored |
+|-------|---------|-------------------|
+| `ConsoleLogin` | signin | Successful and failed console access — T1078 |
+| `CreateAccessKey` | IAM | Programmatic credential creation — T1078 |
+| `AttachUserPolicy` / `AttachRolePolicy` | IAM | Privilege escalation via policy attachment — T1078 |
+| `StopInstances` / `TerminateInstances` | EC2 | Destructive compute actions — T1485 |
+| `DeleteVolume` | EC2 | Storage destruction — T1485 |
+| `DeleteSecurityGroup` | EC2 | Defense evasion / network control removal |
+| `CreateBucket` | S3 | New storage resources — T1537 |
+| `DeleteBucket` | S3 | Data destruction — T1485 |
+| `PutBucketPolicy` / `DeleteBucketPolicy` | S3 | Exfiltration risk via policy misconfiguration — T1530 |
 
-**Layered detection logic:** EventBridge handles coarse filtering (which event types matter at all), while Lambda implements the fine-grained condition logic (field-level checks, enrichment, threshold logic). This separation mirrors the Sigma `logsource` → `detection` structure and reflects how mature SIEM pipelines separate ingestion filtering from rule evaluation.
-
-**Structured findings:** Each DynamoDB record is a structured finding — not a raw log. It contains the evaluated fields, the detection name, severity, and timestamp. This mirrors how a SIEM normalizes events into a consistent alert schema (ECS in Elastic, ASIM in Sentinel).
-
-**Cloud-native telemetry:** CloudTrail is the AWS equivalent of Windows Security Event logs — it's the authoritative audit log for the control plane. Understanding which API calls map to which attacker behaviors (the MITRE ATT&CK Cloud matrix) is the cloud analog of mapping Sysmon Event IDs to technique coverage.
-
-**Pipeline observability:** Lambda logs execution metrics to CloudWatch. Failed invocations, processing errors, and latency are all observable — equivalent to monitoring a SIEM rule's execution health.
+This is the Sigma `logsource` equivalent in cloud-native form — scope the input before evaluating conditions.
 
 ---
 
-## Threat Model
+### Lambda Function — `lambda/lambda_handler.py`
 
-This pipeline targets the **initial access → privilege escalation → defense evasion** chain in a cloud environment:
+The Lambda function is the detection engine. It receives each filtered CloudTrail event from EventBridge, extracts the relevant fields, and routes to a handler function based on the event name. Each handler implements the detection logic for that event type — severity classification, field extraction, and alert construction.
 
-1. An attacker obtains AWS credentials via phishing, credential stuffing, or exposed keys in source code
-2. They probe the account with read-only API calls (reconnaissance)
-3. They escalate privilege by attaching a managed policy to their identity
-4. They disable CloudTrail or flow logs to prevent detection of subsequent lateral movement
-5. They create a backdoor IAM user or access key for persistence
+**Detection handlers:**
 
-The pipeline fires at steps 3–5 and provides enough telemetry (source IP, identity ARN, timestamp) to support incident response.
+**Root account activity** — any action by a `Root` identity type fires a CRITICAL alert and short-circuits all other logic. Root usage is almost never legitimate in a mature account.
+
+**`CreateAccessKey`** — HIGH severity. Extracts both the actor (who created the key) and the target (who the key was created for) — these can differ if an admin is creating keys on behalf of another user, which is itself a signal worth reviewing.
+
+**`AttachUserPolicy` / `AttachRolePolicy`** — HIGH or CRITICAL depending on whether the policy ARN contains "Admin". An `AdministratorAccess` attachment is an immediate privilege escalation indicator.
+
+**`StopInstances` / `TerminateInstances`** — HIGH/CRITICAL. Extracts the list of affected instance IDs from the request parameters so the alert contains actionable scope.
+
+**`ConsoleLogin` (failure)** — stateful brute-force detection using DynamoDB. Failed logins increment a counter with a 5-minute TTL. When the counter hits 5, a HIGH alert fires and the counter resets. This implements T1110 (Brute Force) detection without any external state management.
+
+**`ConsoleLogin` (success)** — LOW severity. Logged to provide a baseline of normal access that can be correlated against other events.
+
+**`CreateBucket`** — MEDIUM. Extracts bucket name and region.
+
+**`DeleteBucket`** — checks the actor against an approved-user allowlist (`APPROVED_S3_DELETE_USERS`). Unapproved deletions fire CRITICAL immediately. Approved deletions still fire CRITICAL but with a different message — bucket deletion is always high-impact regardless of who does it.
+
+**`PutBucketPolicy`** — parses the bucket policy JSON to check for public (`Principal: *`) grants. Public access grants escalate severity from HIGH to CRITICAL automatically.
+
+**`DeleteBucketPolicy`** — HIGH. Removing a policy may leave the bucket protected only by ACLs, which is a common misconfiguration vector.
+
+**Alert structure:**
+
+Every alert written to SNS includes:
+- `alert_id` — unique ID for deduplication
+- `event` / `user` / `sourceIP` / `severity` / `timestamp`
+- `mitre` — MITRE ATT&CK tag (e.g., `T1110 - Brute Force`)
+- `recommended_action` — responder-facing triage guidance, not just a severity label
+- `investigate` — direct CloudTrail console link pre-filtered to the actor's username
+
+SNS `MessageAttributes` are set on each publish so subscribers can filter by `severity` or `team` without processing every message.
+
+**Dual persistence — why S3 was added:**
+
+Lambda writes each finding to two places: DynamoDB (`SIEM-logs`) for queryable alert storage with a 24-hour TTL, and S3 (`siem-quicksight-data/events/`) as structured JSON for analysis. The S3 layer was added because DynamoDB's scan API is not suited for aggregation queries — visualizing trends across all users and event types requires loading the full dataset. S3 + pandas handles that without any additional infrastructure or cost.
 
 ---
 
-## Setup
+### Analysis Notebook — `analysis/visuals.ipynb`
 
-See the project source for deployment instructions. The infrastructure is defined with the AWS CDK / CloudFormation and can be deployed to any AWS account.
+A Jupyter notebook that reads all event records from the S3 bucket and produces six visualizations against the real pipeline data.
 
-Required IAM permissions for the Lambda execution role:
-- `dynamodb:PutItem` on the findings table
-- `sns:Publish` on the alert topic
-- `cloudtrail:LookupEvents` (for enrichment queries — optional)
+**Data source:** Paginates `siem-quicksight-data/events/` via the S3 API, loads each JSON object, and builds a pandas DataFrame with columns: `username`, `event_name`, `source_ip`, `severity`, `team`, `timestamp`.
+
+**Visualizations:**
+
+| # | Chart | What It Shows |
+|---|-------|--------------|
+| 1 | Events over time | Daily event volume timeline — identifies activity spikes and quiet periods |
+| 2 | Event type distribution | Bar chart of event names by frequency — shows which API calls are most active |
+| 3 | Severity breakdown | Pie chart of CRITICAL / HIGH / MEDIUM / LOW distribution — overall risk posture at a glance |
+| 4 | Most active users | Bar chart of event count per username — surfaces high-activity accounts for review |
+| 5 | Source IP activity | Horizontal bar of events per source IP — anomaly signal for unexpected origins |
+| 6 | High & Critical events only | Filtered view of HIGH and CRITICAL event types — analyst focus view |
+
+All charts use a dark theme (`#0f1117` background) consistent with a SOC dashboard aesthetic.
+
+---
+
+## MITRE ATT&CK Coverage
+
+| Technique | ID | Events Covered |
+|-----------|----|---------------|
+| Valid Accounts | T1078 | ConsoleLogin, CreateAccessKey, AttachUserPolicy, AttachRolePolicy |
+| Brute Force | T1110 | ConsoleLogin (repeated failures — stateful 5-minute window counter) |
+| Data Destruction | T1485 | TerminateInstances, StopInstances, DeleteBucket, DeleteVolume |
+| Data from Cloud Storage | T1530 | PutBucketPolicy, DeleteBucketPolicy |
+| Transfer Data to Cloud Account | T1537 | CreateBucket |
+
+---
+
+## Design Decisions
+
+**Why stateful brute-force detection in DynamoDB instead of a fixed-window CloudWatch metric?**
+CloudWatch metrics aggregate at the account level. DynamoDB tracks the counter per-username across invocations — a user failing 4 times across 4 separate Lambda executions within 5 minutes still triggers the alert. The TTL attribute handles automatic expiry without a cleanup job.
+
+**Why write to S3 in addition to DynamoDB?**
+DynamoDB is optimized for key-based access, not aggregation. Analyzing event trends across all users and event types requires scanning the full dataset, which is expensive with DynamoDB. Writing structured JSON to S3 gives the same data in a form that's analytically flexible — pandas can load it directly for visualization with no additional infrastructure.
+
+**Why include `recommended_action` in the alert payload?**
+A severity label tells you how urgent the alert is. The `recommended_action` field tells the responder what to actually do — which IAM permissions to check, whether to disable a key, what to verify with the user. This reduces triage time and keeps the response consistent across team members.
+
+---
+
+## Required IAM Permissions (Lambda Execution Role)
+
+```
+dynamodb:PutItem        — SIEM-logs table
+dynamodb:UpdateItem     — SIEM-failed-logins table
+s3:PutObject            — siem-quicksight-data bucket
+sns:Publish             — siem-alerts topic
+```

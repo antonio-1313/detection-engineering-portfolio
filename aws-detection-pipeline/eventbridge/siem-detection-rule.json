@@ -1,0 +1,23 @@
+{
+  "source": ["aws.signin", "aws.iam", "aws.ec2", "aws.s3"],
+  "detail-type": [
+    "AWS Console Sign In via CloudTrail",
+    "AWS API Call via CloudTrail"
+  ],
+  "detail": {
+    "eventName": [
+      "ConsoleLogin",
+      "CreateAccessKey",
+      "AttachUserPolicy",
+      "AttachRolePolicy",
+      "StopInstances",
+      "TerminateInstances",
+      "DeleteVolume",
+      "DeleteSecurityGroup",
+      "CreateBucket",
+      "DeleteBucket",
+      "PutBucketPolicy",
+      "DeleteBucketPolicy"
+    ]
+  }
+}
