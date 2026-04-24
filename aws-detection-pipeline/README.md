@@ -19,7 +19,7 @@ AWS Lambda  (lambda_handler.py — detection engine)
      │
      ├──► Amazon DynamoDB    SIEM-logs table       (alert store, 24h TTL)
      ├──► Amazon DynamoDB    SIEM-failed-logins    (stateful brute-force counter, 5m TTL)
-     ├──► Amazon S3          siem-quicksight-data  (structured event log for analysis)
+     ├──► Amazon S3          siem-data  (structured event log for analysis)
      └──► Amazon SNS         siem-alerts           (alert delivery — email + filtering)
 ```
 
