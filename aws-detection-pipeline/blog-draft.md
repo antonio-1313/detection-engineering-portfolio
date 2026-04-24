@@ -19,6 +19,8 @@ Most cloud security tutorials show you how to turn on GuardDuty and call it a da
 
 This is what we built, what broke, and what we'd do differently.
 
+> **All source code for this project is on GitHub:** [detection-engineering-portfolio/aws-detection-pipeline](https://github.com/antonio-1313/detection-engineering-portfolio/tree/main/aws-detection-pipeline)
+
 ---
 
 ## The Problem Statement
@@ -65,6 +67,8 @@ We settled on watching four AWS sources — `aws.signin`, `aws.iam`, `aws.ec2`, 
 
 This maps to the same concept as a Sigma rule's `logsource` block — you define the scope of what you're ingesting before you write the detection condition.
 
+> 📸 **SCREENSHOT — EventBridge console:** Open EventBridge → Rules → `siem-detection-rule`. Capture the rule detail page showing the event pattern JSON and the Lambda target. This shows the reader exactly what the filter looks like in practice.
+
 ### The Lambda Detection Engine
 
 Lambda receives each filtered event and routes it to a handler function based on the event name. Each handler extracts the relevant fields from the CloudTrail detail object and builds an alert.
@@ -77,17 +81,29 @@ A few design decisions worth explaining:
 
 **Every alert includes a direct CloudTrail investigation link** pre-filtered to the actor's username. Small thing, but it removes friction when you're triaging at 2am.
 
+> 📸 **SCREENSHOT — Lambda console:** Open Lambda → Functions → your handler function. Capture the function overview page showing the EventBridge trigger wired up, and optionally a test invocation result showing a formatted alert in the execution logs. This makes the event flow visual.
+
 ### Stateful Brute Force Detection
 
-This was one of the more interesting engineering problems. Lambda functions are stateless — every invocation starts cold. So you can't just do `counter += 1` in your function code and expect it to persist across calls. 
+This was one of the more interesting engineering problems. Lambda functions are stateless — every invocation starts cold. So you can't just do `counter += 1` in your function code and expect it to persist across calls.
 
 [Explain the DynamoDB solution here: each failed login increments a counter keyed by username using `update_item` with ADD, a TTL attribute automatically expires the record after 5 minutes, and when the count hits 5 the alert fires and the counter resets. This gives you a sliding window without any scheduled cleanup jobs.]
 
 The trade-off is latency and cost — every failed login now requires a DynamoDB write and read. Under normal conditions this is negligible, but under a real brute force attack hitting Lambda concurrently you could get race conditions on the counter. [Mention how you'd address this in a production system — conditional writes, or moving to an atomic counter service.]
 
+> 📸 **SCREENSHOT — DynamoDB console:** Open DynamoDB → Tables → `SIEM-failed-logins` → Explore items. If you have a test record in there showing a username, fail_count, and ttl field, capture it. This illustrates the stateful counter pattern concretely.
+
+> 📸 **SCREENSHOT — DynamoDB console:** Open DynamoDB → Tables → `SIEM-logs` → Explore items. Capture a few rows showing real alert records — event_name, severity, source_ip, username. This shows findings being persisted as structured data.
+
 ### The Approved User Allowlist for S3 Deletes
 
 [Explain the `APPROVED_S3_DELETE_USERS` set. Bucket deletion is always high-impact, but not all deletions are malicious. Rather than suppressing all alerts from admins, you still fire on approved users — but the alert message is different. An unapproved user deleting a bucket fires CRITICAL with a message that explicitly names the unauthorized actor. This is the cloud equivalent of a Sigma filter that excludes known-legitimate parents while still alerting on everything else.]
+
+### SNS Alerts
+
+[Describe what the alert email looks like — the JSON payload with alert_id, severity, mitre tag, recommended_action, and the investigation link.]
+
+> 📸 **SCREENSHOT — SNS alert email:** Show the full alert email received in your inbox from `siem-alerts`. Redact any sensitive account info but keep the alert structure visible — the severity, mitre field, recommended_action, and investigate link are the key things to show. This is the most tangible output of the pipeline.
 
 ---
 
@@ -101,6 +117,8 @@ The trade-off is latency and cost — every failed login now requires a DynamoDB
 
 **Lesson:** Test each event type individually before building the handler. EventBridge silently drops events that don't match the rule — there's no "event rejected" log unless you wire up a dead-letter queue.
 
+> 📸 **SCREENSHOT — CloudWatch Logs:** Open CloudWatch → Log groups → your Lambda log group. Show a log stream with the failed login events appearing after the fix. Before/after if you have it. This makes the debugging story real.
+
 ### Issue 2: QuickSight S3 Integration Wouldn't Work
 
 [This was the biggest time sink. QuickSight recently overhauled its data source integration UI and the documentation hadn't caught up. Multiple attempts to connect S3 data sources failed with opaque permission errors. The only resolution path was opening a support case with AWS.]
@@ -108,6 +126,8 @@ The trade-off is latency and cost — every failed login now requires a DynamoDB
 **Fix:** Pivoted to writing event records as structured JSON to S3 and reading them locally with pandas and matplotlib. This actually ended up being more flexible — we could iterate on visualizations without the QuickSight refresh cycle.
 
 **Lesson:** Before committing to a managed visualization service, verify the integration path with a minimal test. QuickSight's S3 integration requires specific bucket policies, manifest files, and IAM role configurations that aren't obvious from the console.
+
+> 📸 **SCREENSHOT — S3 console:** Open S3 → `siem-data` bucket → `events/` prefix. Show the list of JSON files written by Lambda. This illustrates the S3 persistence layer and also shows the pipeline is actively writing data.
 
 ### Issue 3: S3 Bucket Permissions Were Locked Down
 
@@ -148,6 +168,8 @@ Key changes from the initial design:
 - Most active users — [anything interesting here?]
 - Source IP activity — [same IPs across multiple events is a signal worth noting]
 - High & Critical events only — the analyst focus view
+
+> 📸 **SCREENSHOT — Notebook charts:** Run `visuals.ipynb` and capture each of the six charts. Embed the most visually striking ones inline — the severity pie chart and the events-over-time line chart tend to read best. The source IP horizontal bar is good for showing the anomaly-detection angle.
 
 ---
 
