@@ -91,7 +91,47 @@ This was one of the more interesting engineering problems. Lambda functions are 
 
 The trade-off is latency and cost — every failed login now requires a DynamoDB write and read. Under normal conditions this is negligible, but under a real brute force attack hitting Lambda concurrently you could get race conditions on the counter. [Mention how you'd address this in a production system — conditional writes, or moving to an atomic counter service.]
 
-> 📸 **SCREENSHOT — DynamoDB console:** Open DynamoDB → Tables → `SIEM-failed-logins` → Explore items. If you have a test record in there showing a username, fail_count, and ttl field, capture it. This illustrates the stateful counter pattern concretely.
+The actual implementation in `lambda_handler.py`:
+
+```python
+FAILED_LOGIN_THRESHOLD = 5
+TTL_WINDOW = 300  # 5 minutes
+
+def handle_failed_login(user, source_ip):
+    current_time = int(time.time())
+    expiry_time = current_time + TTL_WINDOW
+
+    response = failed_logins_table.update_item(
+        Key={'username': user},
+        UpdateExpression='ADD fail_count :inc SET last_attempt = :ts, #ttl_attr = :ttl',
+        ExpressionAttributeNames={'#ttl_attr': 'ttl'},
+        ExpressionAttributeValues={
+            ':inc': 1,
+            ':ts': current_time,
+            ':ttl': expiry_time
+        },
+        ReturnValues='UPDATED_NEW'
+    )
+
+    fail_count = int(response['Attributes']['fail_count'])
+
+    if fail_count >= FAILED_LOGIN_THRESHOLD:
+        send_alert(
+            event_name='ConsoleLogin - Brute Force Detected',
+            user=user,
+            source_ip=source_ip,
+            severity='HIGH',
+            extra=f"Failed attempts: {fail_count} in last 5 minutes — MITRE T1110"
+        )
+        # Reset counter after alert fires
+        failed_logins_table.update_item(
+            Key={'username': user},
+            UpdateExpression='SET fail_count = :zero',
+            ExpressionAttributeValues={':zero': 0}
+        )
+```
+
+Each failed login atomically increments `fail_count` via `ADD` (safe under concurrent Lambda invocations), sets `last_attempt`, and writes a `ttl` timestamp 300 seconds out so DynamoDB auto-expires the record. When the count hits 5 the alert fires and the counter resets — no scheduled cleanup needed.
 
 > 📸 **SCREENSHOT — DynamoDB console:** Open DynamoDB → Tables → `SIEM-logs` → Explore items. Capture a few rows showing real alert records — event_name, severity, source_ip, username. This shows findings being persisted as structured data.
 
