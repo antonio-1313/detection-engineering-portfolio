@@ -1,0 +1,15 @@
+# Logs and secrets
+*.log
+*.key
+*.env
+docker-compose.override.yml
+
+# macOS
+.DS_Store
+
+# Secrets / credentials
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/

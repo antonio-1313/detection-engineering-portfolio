@@ -1,0 +1,43 @@
+// EQL — Elastic Security (lab-tested)
+// T1059.001 — PowerShell Encoded Command Execution
+// Tested against Sysmon telemetry in Elastic Stack 8.13
+//
+// Run in: Elastic Security > Detection Rules > Create Rule > EQL
+// Or:     Kibana Dev Tools > POST /_eql/search with index pattern logs-*
+//
+// Field mapping assumes Elastic Agent with Sysmon integration.
+// process.command_line is populated by Sysmon Event ID 1.
+
+process where event.type == "start" and
+
+  // Match powershell.exe or pwsh.exe (case-insensitive via regex)
+  process.name : ("powershell.exe", "pwsh.exe") and
+
+  // Match -EncodedCommand and common abbreviations followed by a base64 string
+  // The regex covers: -encodedcommand, -enc, -ec, -e (case-insensitive, abbreviated)
+  process.command_line regex~ """(?i).*[\s\-](e(nc(odedcommand)?|c))\s+[A-Za-z0-9+/]{20,}={0,2}.*""" and
+
+  // Exclude known-legitimate parent processes
+  not process.parent.name : (
+    "MpCmdRun.exe",    // Windows Defender
+    "SenseIR.exe",     // Defender for Endpoint
+    "MsMpEng.exe",     // Defender antivirus service
+    "ccmexec.exe",     // SCCM / ConfigMgr
+    "UsoClient.exe",   // Windows Update
+    "WUDFHost.exe"     // Windows Update driver framework
+  )
+
+
+// --- Sequence variant (higher confidence — execution followed by network) ---
+// Uncomment to use a behavioral sequence that correlates PowerShell encoded execution
+// with an outbound network connection within 60 seconds (likely C2 callback).
+
+// sequence with maxspan=60s
+//   [process where event.type == "start" and
+//     process.name : ("powershell.exe", "pwsh.exe") and
+//     process.command_line regex~ """(?i).*[\s\-](e(nc(odedcommand)?|c))\s+[A-Za-z0-9+/]{20,}={0,2}.*"""]
+//   [network where event.type == "start" and
+//     process.name : ("powershell.exe", "pwsh.exe") and
+//     not destination.ip : ("127.0.0.1", "::1") and
+//     not destination.ip : "10.0.0.0/8" and
+//     not destination.ip : "192.168.0.0/16"]

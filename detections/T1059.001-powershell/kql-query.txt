@@ -1,0 +1,58 @@
+// Kusto KQL — Microsoft Sentinel / Google SecOps (Chronicle)
+// T1059.001 — PowerShell Encoded Command Execution
+//
+// For Microsoft Sentinel: run in Log Analytics workspace > Logs, or create a Scheduled Alert rule.
+// For Google SecOps/Chronicle: the platform uses a Kusto-like dialect — syntax is compatible
+// but table names differ (use UDM or raw log tables as appropriate for your instance).
+//
+// Table: DeviceProcessEvents (Microsoft Defender for Endpoint via Sentinel)
+// Adjust table name if ingesting Sysmon via Windows Security Events or a third-party connector.
+
+DeviceProcessEvents
+| where TimeGenerated >= ago(24h)
+
+// Match powershell.exe or pwsh.exe
+| where FileName in~ ("powershell.exe", "pwsh.exe")
+
+// Match -EncodedCommand and common abbreviations (-enc, -ec, -e) followed by base64 payload
+// Kusto regex is case-sensitive by default; (?i) enables case-insensitive matching
+| where ProcessCommandLine matches regex @"(?i)[\s\-](e(nc(odedcommand)?|c))\s+[A-Za-z0-9+/]{20,}={0,2}"
+
+// Exclude known-legitimate parent processes
+| where InitiatingProcessFileName !in~ (
+    "MpCmdRun.exe",
+    "SenseIR.exe",
+    "MsMpEng.exe",
+    "ccmexec.exe",
+    "UsoClient.exe",
+    "WUDFHost.exe"
+)
+
+// Project relevant fields for triage
+| project
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    FileName,
+    ProcessCommandLine,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine,
+    SHA256,
+    FolderPath
+
+| order by TimeGenerated desc
+
+
+// --- Alternative: Windows Security Events table (if using Sysmon / WEF ingest) ---
+// Use this variant if your Sentinel workspace ingests Windows events rather than MDE telemetry.
+
+// SecurityEvent
+// | where TimeGenerated >= ago(24h)
+// | where EventID == 4688                          // Process creation (requires audit policy)
+// | where NewProcessName endswith_cs "powershell.exe"
+//     or NewProcessName endswith_cs "pwsh.exe"
+// | where CommandLine matches regex @"(?i)[\s\-](e(nc(odedcommand)?|c))\s+[A-Za-z0-9+/]{20,}={0,2}"
+// | where ParentProcessName !endswith_cs "MpCmdRun.exe"
+//     and ParentProcessName !endswith_cs "ccmexec.exe"
+// | project TimeGenerated, Computer, Account, CommandLine, ParentProcessName
+// | order by TimeGenerated desc

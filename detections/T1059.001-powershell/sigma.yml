@@ -1,0 +1,49 @@
+title: PowerShell Encoded Command Execution (T1059.001)
+id: 7f3a1c2e-84b6-4d9a-b0f1-3c2e5a8d9f47
+status: experimental
+description: |
+  Detects PowerShell invocations using the -EncodedCommand flag (and common abbreviations
+  -enc, -e, -ec) followed by a base64-encoded payload. This pattern is used by loaders,
+  droppers, and post-exploitation frameworks to execute arbitrary code while avoiding
+  plain-text command-line signatures. Filters known-legitimate parent processes to reduce
+  false positives from Windows management tooling.
+references:
+  - https://attack.mitre.org/techniques/T1059/001/
+  - https://github.com/redcanaryco/atomic-red-team/blob/master/atomics/T1059.001/T1059.001.md
+  - https://redcanary.com/threat-detection-report/techniques/powershell/
+  - https://media.defense.gov/2022/Jun/22/2003021689/-1/-1/1/CSI_KEEPING_POWERSHELL_SECURITY_MEASURES_TO_USE_AND_EMBRACE_20220622.PDF
+author: Antonio Lopez
+date: 2026-04-24
+tags:
+  - attack.t1059.001
+  - attack.execution
+logsource:
+  product: windows
+  service: sysmon
+  definition: Requires Sysmon Event ID 1 (Process Creation) with full command-line logging enabled.
+detection:
+  selection_process:
+    EventID: 1
+    Image|endswith:
+      - '\powershell.exe'
+      - '\pwsh.exe'
+  selection_encoded:
+    CommandLine|re: '(?i)[\s\-](e(nc(odedcommand)?|c))\s+[A-Za-z0-9+/]{20,}={0,2}'
+  filter_legitimate_parents:
+    # Windows Defender and security tooling commonly invoke PowerShell with encoded args
+    ParentImage|endswith:
+      - '\MpCmdRun.exe'
+      - '\SenseIR.exe'
+      - '\MsMpEng.exe'
+      # SCCM / ConfigMgr management agent
+      - '\ccmexec.exe'
+      # Windows Update orchestrator
+      - '\UsoClient.exe'
+      - '\WUDFHost.exe'
+  condition: selection_process and selection_encoded and not filter_legitimate_parents
+falsepositives:
+  - Administrator automation scripts that legitimately base64-encode commands for safe
+    string handling — review parent process and script content via Event ID 4104
+  - Software deployment tools (SCCM, Intune) that encode PowerShell payloads for delivery
+  - Developer IDEs or build systems that invoke PowerShell with encoded arguments
+level: medium
